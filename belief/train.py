@@ -58,7 +58,7 @@ class TrainConfig:
     val_examples: int = 200_000        # cap for periodic validation (full split in eval.py)
     val_elbo_draws: int = 2
     bf16: bool = True
-    compile: bool = False
+    compile: bool = True               # ~1.5x faster on the 4070 (14.4 vs 9.7 steps/s)
     grad_clip: float = 1.0
     subset: int = 0                    # >0: train on the first N train examples and validate on them (overfit test)
     log_every: int = 100
