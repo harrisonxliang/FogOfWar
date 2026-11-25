@@ -63,6 +63,10 @@ class TrainConfig:
     subset: int = 0                    # >0: train on the first N train examples and validate on them (overfit test)
     log_every: int = 100
     device: str = 'cuda'
+    wandb: bool = False                # mirror metrics/config to Weights & Biases (local files stay canonical)
+    wandb_project: str = 'fow-belief'
+    wandb_entity: str = ''             # '' = your default wandb entity
+    wandb_group: str = ''              # e.g. group the 3 seeds of one configuration
 
 
 def apply_overrides(cfg: TrainConfig, overrides: dict) -> TrainConfig:
@@ -159,10 +163,16 @@ def train(cfg: TrainConfig) -> Path:
     (run_dir / 'config.json').write_text(json.dumps(meta, indent=1))
     print(json.dumps({k: meta[k] for k in ('n_params', 'n_train', 'n_val', 'total_steps', 'baselines')}))
     metrics_f = open(run_dir / 'metrics.jsonl', 'w')
+    wb = None
+    if cfg.wandb:
+        from belief.wandb_log import WandbRun
+        wb = WandbRun(meta, run_dir, cfg.wandb_project, cfg.wandb_entity, cfg.wandb_group)
 
     def log(row):
         metrics_f.write(json.dumps(row) + '\n')
         metrics_f.flush()
+        if wb:
+            wb.log(row)
 
     data = to_device(train_np, device)
     gen = torch.Generator(device=device).manual_seed(cfg.seed)
@@ -225,6 +235,8 @@ def train(cfg: TrainConfig) -> Path:
                 finished=time.strftime('%Y-%m-%dT%H:%M:%S'), train_seconds=time.time() - t0)
     (run_dir / 'config.json').write_text(json.dumps(meta, indent=1))
     plot_run(run_dir)
+    if wb:
+        wb.finish(run_dir, {'best_val_elbo_bits': best, 'best_step': best_step, 'final_step': step + 1})
     print(f'done: best val ELBO {best:.4f} bits/hidden square at step {best_step}; '
           f'baselines last-seen {baselines["last_seen_val_bits"]:.4f}, '
           f'frequency {baselines["frequency_val_bits"]:.4f}; {run_dir}')
