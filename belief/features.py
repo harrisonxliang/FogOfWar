@@ -183,6 +183,23 @@ class ViewTracker:
                             to_move=to_move, viewer_is_white=self.white, obs=self.obs, t=self.t)
 
 
+_CUR_CHARS = np.frombuffer(b'?-PNBRQKpnbrqk', dtype=np.uint8)
+_SWAP = np.arange(256, dtype=np.uint8)
+for _a, _b in zip(b'PNBRQK', b'pnbrqk'):
+    _SWAP[_a], _SWAP[_b] = _b, _a
+
+
+def view_from_arrays(cur, last, age, inv, ply, to_move, viewer_is_white: bool, t: int = -1) -> ViewFeatures:
+    """Rebuild a ViewFeatures from stored dataset arrays (the observation string
+    is recovered from cur). For benchmarks and offline evaluation."""
+    cur = np.asarray(cur, dtype=np.uint8)
+    canon = _CUR_CHARS[cur]
+    raw = canon if viewer_is_white else _SWAP[canon][MIRROR]
+    return ViewFeatures(cur=cur.copy(), last=np.asarray(last, np.uint8).copy(), age=np.asarray(age, np.uint8).copy(),
+                        inv=np.asarray(inv, np.uint8).copy(), ply=int(ply), to_move=int(to_move),
+                        viewer_is_white=bool(viewer_is_white), obs=raw.tobytes().decode('ascii'), t=int(t))
+
+
 def board_from_canonical(values: np.ndarray, view: ViewFeatures) -> str:
     """Canonical per-square fill (0 empty, 1-6 enemy P..K; only read on unseen
     squares) -> 64-char full board in the original orientation and colours.
