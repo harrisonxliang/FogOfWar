@@ -67,6 +67,34 @@ def test_forbid_empty_when_squares_must_be_filled():
         assert sorted(b[40:43]) == ['k', 'n', 'p']
 
 
+def test_lookahead_never_strands_a_pawn_on_back_rank_squares():
+    # unseen: 3 back-rank squares (a8 b8 c8) + 1 non-back square (a6); budget: king + one pawn.
+    # The pawn can only go on a6, so a6 must never be left empty or given the king.
+    cur = np.ones(64, np.uint8)
+    cur[4] = 7
+    cur[[56, 57, 58, 40]] = 0
+    v = view_from_arrays(cur, np.zeros(64), np.zeros(64), np.array([1, 0, 0, 0, 0, 0, 1]), 0, 1, True)
+    s = DiffusionBelief(forward=uniform_forward)
+    for T in (1, 2, 4):
+        boards, info = s.sample_with_info([v], 64, T, np.random.default_rng(T))
+        assert not info['violated'].any()
+        for b in boards[0]:
+            assert b[40] == 'p' and b.count('k') == 1 and all(check_board(v, b).values())
+
+
+def test_lookahead_keeps_a_square_for_each_bishop_colour():
+    # unseen: one light (b1 is light) and several dark squares; budget: king + light bishop.
+    cur = np.ones(64, np.uint8)
+    cur[4] = 7
+    unseen = [1, 41, 43, 45]          # b1 light; b6, d6, f6 dark
+    cur[unseen] = 0
+    v = view_from_arrays(cur, np.zeros(64), np.zeros(64), np.array([0, 0, 1, 0, 0, 0, 1]), 0, 1, True)
+    s = DiffusionBelief(forward=uniform_forward)
+    boards, info = s.sample_with_info([v], 64, 2, np.random.default_rng(0))
+    assert not info['violated'].any()
+    assert all(b[1] == 'b' and b.count('k') == 1 for b in boards[0])
+
+
 def test_rank_rules_and_black_orientation():
     v = view({}, [8, 0, 0, 0, 0, 0, 1], white=False)
     s = DiffusionBelief(forward=uniform_forward)
