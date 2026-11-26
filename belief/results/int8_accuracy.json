@@ -2,14 +2,14 @@
  "fp32": "belief/B.onnx",
  "int8": "belief/B_int8.onnx",
  "n_val_examples": 50000,
- "shards": "data/shards/arena3k",
- "fp32_onestep_bits": 0.5423920450960402,
- "int8_onestep_bits": 0.5424726663694074,
- "fp32_elbo_bits": 0.35599527454879015,
- "int8_elbo_bits": 0.3560345197806366,
- "onestep_rel_change": 0.00014864022084415396,
- "argmax_agreement": 0.9967718344497298,
+ "shards": "data/shards/arena17k",
+ "fp32_onestep_bits": 0.49855432092893864,
+ "int8_onestep_bits": 0.49911942745286636,
+ "fp32_elbo_bits": 0.3132797603293004,
+ "int8_elbo_bits": 0.3137301030851935,
+ "onestep_rel_change": 0.0011334903744786295,
+ "argmax_agreement": 0.9958046426379465,
  "accuracy_ok": true,
  "fp32_bytes": 3294755,
- "int8_bytes": 946060
+ "int8_bytes": 946062
 }
