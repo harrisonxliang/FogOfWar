@@ -22,11 +22,12 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from referee import FowBoard
+from referee import FowBoard, fow_moves
 from boardgen.encoding import HistoryTracker
 from boardgen.sample import BeliefState, TorchPredictor
 from boardeval.evaluator import get_evaluator
-from boardeval.reply import MoverContext, clairvoyant, like_me, naive_last_seen, uniform_random
+from boardeval.reply import (MoverContext, clairvoyant, like_me, naive_last_seen,
+                             to_distribution, uniform_random)
 
 
 def board_from_frame(frame, side):
@@ -41,13 +42,17 @@ def board_from_frame(frame, side):
 
 
 class Tally:
-    def __init__(self):
+    def __init__(self, tau=150.0, floor=0.02):
+        self.tau = tau
+        self.floor = floor
         self.top1 = 0
         self.top3 = 0
         self.reciprocal = 0.0
         self.count = 0
+        self.logp = 0.0       # sum of log p(actual) under the smoothed distribution
+        self.logp_count = 0
 
-    def add(self, ranked, actual):
+    def add(self, ranked, actual, legal):
         self.count += 1
         ucis = [uci for uci, _ in ranked]
         if actual in ucis:
@@ -55,18 +60,28 @@ class Tally:
             self.top1 += rank == 1
             self.top3 += rank <= 3
             self.reciprocal += 1.0 / rank
-        # absent -> all misses
+        # absent from the ranking -> all rank-misses; LL still scored below.
+        # Log-likelihood: the smoothing floor (NOTES.md §4) guarantees every
+        # legal move keeps mass, so this never hits -inf.
+        dist = to_distribution(ranked, legal, tau=self.tau, floor=self.floor)
+        p_actual = dist.get(actual)
+        if p_actual:  # actual not legal would mean a replay/rules mismatch; skip
+            self.logp += float(np.log(p_actual))
+            self.logp_count += 1
 
     def row(self):
         if not self.count:
             return '    (no predictions)'
+        ll = self.logp / self.logp_count if self.logp_count else float('nan')
         return (f'top1 {self.top1 / self.count:6.3f}   '
                 f'top3 {self.top3 / self.count:6.3f}   '
                 f'MRR {self.reciprocal / self.count:6.3f}   '
+                f'LL {ll:7.3f}   '
                 f'n={self.count}')
 
 
-def run(replay_paths, checkpoint, evaluator_kind, games_limit, j, steps, seed):
+def run(replay_paths, checkpoint, evaluator_kind, games_limit, j, steps, seed,
+        tau=150.0, floor=0.02):
     evaluate, close = get_evaluator(evaluator_kind)
     predictor = TorchPredictor(checkpoint) if checkpoint else None
     rng = np.random.default_rng(seed)
@@ -76,7 +91,7 @@ def run(replay_paths, checkpoint, evaluator_kind, games_limit, j, steps, seed):
     if predictor is not None:
         models['like_me_diffusion'] = lambda ctx: like_me(
             ctx, evaluate, predictor, j=j, steps=steps, rng=rng)
-    tallies = defaultdict(Tally)
+    tallies = defaultdict(lambda: Tally(tau=tau, floor=floor))
     started = time.monotonic()
     plies = 0
     for game_index, path in enumerate(replay_paths[:games_limit]):
@@ -95,10 +110,11 @@ def run(replay_paths, checkpoint, evaluator_kind, games_limit, j, steps, seed):
                                observation=frame['white' if side else 'black'],
                                tracker=trackers[side], belief_state=beliefs[side],
                                ply=frame['ply'])
+            legal = [move.uci() for move in fow_moves(ctx.true_board)]
             for name, model in models.items():
                 ranked = model(ctx)
                 if ranked:
-                    tallies[name].add(ranked, actual)
+                    tallies[name].add(ranked, actual, legal)
             plies += 1
         if (game_index + 1) % 10 == 0:
             print(f'{game_index + 1} games, {plies} plies, '
@@ -122,11 +138,16 @@ def main():
     parser.add_argument('--j', type=int, default=4, help='believed boards per view')
     parser.add_argument('--steps', type=int, default=4, help='diffusion steps')
     parser.add_argument('--seed', type=int, default=0)
+    parser.add_argument('--tau', type=float, default=150.0,
+                        help='reply softmax temperature (cp scale); fit per team offline')
+    parser.add_argument('--floor', type=float, default=0.02,
+                        help='uniform smoothing mass so LL never hits -inf')
     args = parser.parse_args()
     paths = []
     for entry in args.replays:
         paths.extend(sorted(entry.glob('*.json')) if entry.is_dir() else [entry])
-    run(paths, args.checkpoint, args.evaluator, args.games, args.j, args.steps, args.seed)
+    run(paths, args.checkpoint, args.evaluator, args.games, args.j, args.steps,
+        args.seed, tau=args.tau, floor=args.floor)
 
 
 if __name__ == '__main__':
