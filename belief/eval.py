@@ -267,6 +267,90 @@ def plot_run(run_dir: Path):
     plt.close(fig)
 
 
+# --- sampler metrics (what the planner actually consumes) -------------------------------------
+
+def torch_forward(model, device):
+    """Wrap a PyTorch model as the sampler's forward(dict of int64 arrays) -> logits."""
+    names = ('cur', 'last', 'age', 'xt', 'inv', 'ply', 'to_move')
+
+    @torch.no_grad()
+    def f(inputs):
+        return model(*[torch.from_numpy(inputs[k]).to(device) for k in names]).float().cpu().numpy()
+    return f
+
+
+def _views(data, idx):
+    from belief.features import view_from_arrays
+    return [view_from_arrays(data['cur'][i], data['last'][i], data['age'][i], data['inv'][i], data['ply'][i],
+                             data['to_move'][i], data['viewer'][i] == 0, data['t'][i]) for i in idx]
+
+
+def sample_metrics(forward, data, idx, J: int = 8, Ts=(1, 2, 4, 8), seed: int = 0, chunk: int = 128) -> dict:
+    """Validity, diversity and accuracy of sampled boards, per T, with the
+    sampler's constraints on (deployed setting) and off (the model alone).
+
+    validity  share of boards with exactly one enemy king, counts within inv,
+              no back-rank pawns and no violated flag; also reported excluding
+              views where the enemy promoted unseen (inv is then knowingly wrong)
+    distinct  mean number of distinct boards among J samples of one view
+    sq_acc    share of hidden squares where a sample matches the true board
+    piece_acc same, on hidden squares that truly hold an enemy piece
+    """
+    from belief.sampler import DiffusionBelief, SamplerConfig, check_board
+    views = _views(data, idx)
+    promo = data['promo'][idx].astype(bool)
+    modes = {'constrained': SamplerConfig(),
+             'unconstrained': SamplerConfig(hard_inventory=False, rank_rules=False)}
+    out = {'n_views': len(idx), 'J': J, 'n_promo_views': int(promo.sum()), 'by_T': {}}
+    for T in Ts:
+        for mode, cfg in modes.items():
+            rng = np.random.default_rng(seed)
+            bel = DiffusionBelief(forward=forward, config=cfg)
+            valid = np.zeros((len(idx), J), dtype=bool)
+            distinct = np.zeros(len(idx))
+            sq_hit = sq_n = pc_hit = pc_n = 0
+            for s in range(0, len(views), chunk):
+                vs = views[s:s + chunk]
+                boards, info = bel.sample_with_info(vs, J, T, rng)
+                vals = info['values'].reshape(len(vs), J, 64)
+                viol = info['violated'].reshape(len(vs), J)
+                for i, (v, bs) in enumerate(zip(vs, boards)):
+                    k = s + i
+                    chk = [check_board(v, b) for b in bs]
+                    valid[k] = [c['one_king'] and c['within_inv'] and c['no_back_pawns'] for c in chk]
+                    valid[k] &= ~viol[i]
+                    distinct[k] = len(set(bs))
+                    hidden = data['cur'][idx[k]] == 0
+                    tv = data['tgt'][idx[k]][hidden].astype(np.int64)
+                    sv = vals[i][:, hidden]
+                    sq_hit += int((sv == tv).sum())
+                    sq_n += sv.size
+                    pieces = tv > 0
+                    pc_hit += int((sv[:, pieces] == tv[pieces]).sum())
+                    pc_n += int(pieces.sum()) * J
+            out['by_T'][f'{mode}_T{T}'] = {
+                'mode': mode, 'T': T, 'validity': float(valid.mean()),
+                'validity_excl_promo': float(valid[~promo].mean()) if (~promo).any() else None,
+                'distinct_of_J': float(distinct.mean()),
+                'sq_acc': sq_hit / max(sq_n, 1), 'piece_acc': pc_hit / max(pc_n, 1)}
+    return out
+
+
+def logprob_metrics(forward, data, idx) -> dict:
+    """Exact chain-rule log p(true board | view) via DiffusionBelief.log_prob, in bits per hidden square."""
+    from belief.features import board_from_canonical
+    from belief.sampler import DiffusionBelief
+    bel = DiffusionBelief(forward=forward)
+    views = _views(data, idx)
+    nll = np.zeros(len(idx))
+    nh = np.zeros(len(idx), dtype=np.int64)
+    for k, (i, v) in enumerate(zip(idx, views)):
+        board = board_from_canonical(np.maximum(data['tgt'][i], 0), v)
+        nll[k] = -bel.log_prob(v, board)
+        nh[k] = int((v.cur == 0).sum())
+    return bits_with_ci(nll, nh, data['game'][idx])        # nats in; bits_with_ci converts to bits
+
+
 def load_checkpoint(path: Path, device):
     ckpt = torch.load(path, map_location=device, weights_only=False)
     model = build(ckpt['model_config']).to(device)
@@ -284,6 +368,8 @@ def main():
     ap.add_argument('--max-examples', type=int, default=None)
     ap.add_argument('--elbo-draws', type=int, default=4)
     ap.add_argument('--out', type=Path, default=Path(__file__).resolve().parent / 'results')
+    ap.add_argument('--sample-n', type=int, default=2000, help='views for sampler/log_prob metrics (0 = skip)')
+    ap.add_argument('--sample-T', type=int, nargs='+', default=[1, 2, 4, 8])
     args = ap.parse_args()
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     model, ckpt = load_checkpoint(args.run / 'best.pt', device)
@@ -309,6 +395,12 @@ def main():
     results['accuracy_onestep'] = accuracy(sc['probs'], sc['probs_tgt'])
     cal = ece(sc['probs'], sc['probs_tgt'])
     results['ece_onestep'] = {k: v['ece'] for k, v in cal.items()}
+    if args.sample_n:
+        idx = np.sort(np.random.default_rng(0).choice(len(data['t']), min(args.sample_n, len(data['t'])),
+                                                      replace=False))
+        fwd = torch_forward(model, device)
+        results['log_prob'] = logprob_metrics(fwd, data, idx)
+        results['samples'] = sample_metrics(fwd, data, idx, J=8, Ts=tuple(args.sample_T))
     args.out.mkdir(parents=True, exist_ok=True)
     stem = f'{args.run.name}_{args.split}'
     (args.out / f'{stem}_metrics.json').write_text(json.dumps({**results, 'calibration': cal}, indent=1))
@@ -322,6 +414,18 @@ def main():
     lines += ['', f'one-step accuracy: overall {acc["overall"]:.3f}, balanced {acc["balanced"]:.3f}; per class: ' +
               ', '.join(f'{k} {v:.3f}' for k, v in acc['per_class'].items() if v is not None),
               'ECE: ' + ', '.join(f'{k} {v:.4f}' for k, v in results['ece_onestep'].items())]
+    if 'samples' in results:
+        lp, sm = results['log_prob'], results['samples']
+        lines += ['', f'True-board log-likelihood (exact chain rule, {lp["n_examples"]} views): '
+                  f'{fmt(lp)} bits per hidden square', '',
+                  f'Sampled boards ({sm["n_views"]} views x J={sm["J"]}; {sm["n_promo_views"]} views with an '
+                  f'unseen enemy promotion):', '',
+                  '| sampler | T | validity | validity excl. promo | distinct of 8 | square acc | piece acc |',
+                  '|---|---|---|---|---|---|---|']
+        for r in sm['by_T'].values():
+            ex = r['validity_excl_promo']
+            lines.append(f'| {r["mode"]} | {r["T"]} | {r["validity"]:.2%} | {"-" if ex is None else f"{ex:.2%}"} '
+                         f'| {r["distinct_of_J"]:.2f} | {r["sq_acc"]:.3f} | {r["piece_acc"]:.3f} |')
     (args.out / f'{stem}_table.md').write_text('\n'.join(lines) + '\n')
     print('\n'.join(lines))
 
