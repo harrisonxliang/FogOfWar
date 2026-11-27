@@ -7,3 +7,8 @@ example-match.json
 
 # Local match replays (test artifacts)
 local_games/
+
+# belief/ training runs and checkpoints
+runs/
+*.pt
+.pytest_cache/

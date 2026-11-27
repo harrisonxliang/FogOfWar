@@ -1,0 +1,15 @@
+{
+ "fp32": "belief/B.onnx",
+ "int8": "belief/B_int8.onnx",
+ "n_val_examples": 50000,
+ "shards": "data/shards/arena30k",
+ "fp32_onestep_bits": 0.48426457463241085,
+ "int8_onestep_bits": 0.4845893242291476,
+ "fp32_elbo_bits": 0.3004954722342586,
+ "int8_elbo_bits": 0.3008773952781145,
+ "onestep_rel_change": 0.000670603661197422,
+ "argmax_agreement": 0.9958365690069774,
+ "accuracy_ok": true,
+ "fp32_bytes": 3294755,
+ "int8_bytes": 946063
+}
